@@ -56,13 +56,22 @@ class ReservationStation
   fastWakeup: Boolean,
   feedback: Boolean,
   enqNum: Int,
-  deqNum: Int
+  deqNum: Int,
+  usedSrcMask: Option[UInt] = None, // data needed by this rs, "b01" means data(0) is needed
+  checkWaitBit: Boolean = false
 )(implicit p: Parameters) extends XSModule {
   val iqIdxWidth = log2Up(iqSize+1)
   val nonBlocked = if (exuCfg == MulDivExeUnitCfg) false else fixedDelay >= 0
   val srcNum = if (exuCfg == JumpExeUnitCfg) 2 else max(exuCfg.intSrcCnt, exuCfg.fpSrcCnt)
 
   // require(nonBlocked==fastWakeup)
+
+  val srcMask = usedSrcMask match {
+    case Some(m) => m
+    case None => VecInit(Seq.fill(srcNum)(true.B)).asUInt
+  }
+  require(srcMask.getWidth == srcNum)
+
   val config = RSConfig(
     name = myName,
     numEntries = iqSize,
@@ -78,7 +87,7 @@ class ReservationStation
     hasFeedback = feedback,
     delayedRf = exuCfg == StExeUnitCfg,
     fixedLatency = fixedDelay,
-    checkWaitBit = if (exuCfg == LdExeUnitCfg || exuCfg == StExeUnitCfg) true else false,
+    checkWaitBit = checkWaitBit,
     optBuf = if (exuCfg == AluExeUnitCfg) true else false
   )
 
@@ -138,7 +147,8 @@ class ReservationStation
     statusArray.io.update(i).data.scheduled := (if (config.delayedRf) needFpSource(i) else false.B)
     statusArray.io.update(i).data.blocked := (if (config.checkWaitBit) io.fromDispatch(i).bits.cf.loadWaitBit else false.B)
     statusArray.io.update(i).data.credit := (if (config.delayedRf) Mux(needFpSource(i), 2.U, 0.U) else 0.U)
-    statusArray.io.update(i).data.srcState := VecInit(io.fromDispatch(i).bits.srcIsReady.take(config.numSrc))
+    statusArray.io.update(i).data.replayCnt := 0.U
+    statusArray.io.update(i).data.srcState := (VecInit(io.fromDispatch(i).bits.srcIsReady.take(config.numSrc)).asUInt | ~srcMask).asBools
     statusArray.io.update(i).data.psrc := VecInit(io.fromDispatch(i).bits.psrc.take(config.numSrc))
     statusArray.io.update(i).data.srcType := VecInit(io.fromDispatch(i).bits.ctrl.srcType.take(config.numSrc))
     statusArray.io.update(i).data.roqIdx := io.fromDispatch(i).bits.roqIdx
@@ -191,6 +201,7 @@ class ReservationStation
       statusArray.io.deqResp(0).valid := io.memfeedback.valid
       statusArray.io.deqResp(0).bits.rsMask := UIntToOH(io.memfeedback.bits.rsIdx)
       statusArray.io.deqResp(0).bits.success := io.memfeedback.bits.hit
+      statusArray.io.deqResp(0).bits.resptype := io.memfeedback.bits.sourceType
     }
     else {
       statusArray.io.issueGranted(i).valid := select.io.grant(i).fire
@@ -198,6 +209,7 @@ class ReservationStation
       statusArray.io.deqResp(i).valid := select.io.grant(i).fire
       statusArray.io.deqResp(i).bits.rsMask := select.io.grant(i).bits
       statusArray.io.deqResp(i).bits.success := io.deq(i).ready
+      statusArray.io.deqResp(i).bits.resptype := RSFeedbackType.normal
     }
     payloadArray.io.read(i).addr := select.io.grant(i).bits
     if (fixedDelay >= 0) {
